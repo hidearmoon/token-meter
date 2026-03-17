@@ -5,10 +5,9 @@
 Lightweight LLM API cost & usage observability — monkey-patch OpenAI / Anthropic / Google in one line, store everything locally in SQLite, get budget alerts and anomaly detection out of the box.
 
 [![CI](https://github.com/hidearmoon/token-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/hidearmoon/token-meter/actions/workflows/ci.yml)
-[![PyPI version](https://badge.fury.io/py/token-meter.svg)](https://pypi.org/project/token-meter/)
+[![Coverage](https://codecov.io/gh/hidearmoon/token-meter/branch/main/graph/badge.svg)](https://codecov.io/gh/hidearmoon/token-meter)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen.svg)](#)
 
 [English](README.md) | [中文](README_zh.md)
 
@@ -74,7 +73,7 @@ tm dashboard
 | Feature | **TokenMeter** | Helicone | LangSmith | LiteLLM Proxy | token-cost-guard |
 |---------|:--------------:|:--------:|:---------:|:-------------:|:----------------:|
 | Monkey-patch (zero code change) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Local SQLite (no SaaS) | ✅ | ❌ | ❌ | ✅ | ❌ |
+| Local SQLite (no SaaS) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Budget alerts | ✅ | ✅ | ❌ | ✅ | ❌ |
 | Anomaly detection | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Open source | ✅ | ✅ | ✅ | ✅ | ✅ |

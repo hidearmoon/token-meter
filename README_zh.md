@@ -5,10 +5,9 @@
 轻量级 LLM API 成本与用量可观测 SDK + CLI。一行代码无侵入接入 OpenAI / Anthropic / Google，数据本地存储于 SQLite，开箱即得预算告警和异常检测。
 
 [![CI](https://github.com/hidearmoon/token-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/hidearmoon/token-meter/actions/workflows/ci.yml)
-[![PyPI version](https://badge.fury.io/py/token-meter.svg)](https://pypi.org/project/token-meter/)
+[![Coverage](https://codecov.io/gh/hidearmoon/token-meter/branch/main/graph/badge.svg)](https://codecov.io/gh/hidearmoon/token-meter)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen.svg)](#)
 
 [English](README.md) | [中文](README_zh.md)
 
@@ -74,7 +73,7 @@ tm dashboard
 | 功能 | **TokenMeter** | Helicone | LangSmith | LiteLLM Proxy | token-cost-guard |
 |------|:--------------:|:--------:|:---------:|:-------------:|:----------------:|
 | Monkey-patch（无需改代码） | ✅ | ❌ | ❌ | ❌ | ❌ |
-| 本地 SQLite（不依赖 SaaS） | ✅ | ❌ | ❌ | ✅ | ❌ |
+| 本地 SQLite（不依赖 SaaS） | ✅ | ❌ | ❌ | ❌ | ❌ |
 | 预算告警 | ✅ | ✅ | ❌ | ✅ | ❌ |
 | 异常检测 | ✅ | ✅ | ❌ | ❌ | ❌ |
 | 开源 | ✅ | ✅ | ✅ | ✅ | ✅ |
