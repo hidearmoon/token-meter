@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "token-meter"
+version = "0.1.0"
+description = "Zero-code LLM API cost & usage observability — monkey-patch OpenAI/Anthropic/Google, store locally in SQLite, get budget alerts."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "OpenForge AI", email = "openforge@hidearmoon.dev" }]
+keywords = [
+    "llm", "openai", "anthropic", "google", "cost", "token", "usage",
+    "observability", "monitoring", "budget", "ai", "pricing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.20.0"]
+google = ["google-genai>=1.0.0"]
+all = ["openai>=1.0.0", "anthropic>=0.20.0", "google-genai>=1.0.0"]
+cli = ["rich>=13.0.0", "typer>=0.9.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+    "openai>=1.0.0",
+    "anthropic>=0.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hidearmoon/token-meter"
+Repository = "https://github.com/hidearmoon/token-meter"
+Issues = "https://github.com/hidearmoon/token-meter/issues"
+
+[project.scripts]
+token-meter = "token_meter.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/token_meter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--tb=short"
+
+[tool.coverage.run]
+source = ["src/token_meter"]
+omit = ["*/tests/*", "*/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

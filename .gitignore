@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+env/
+venv/
+.venv/
+pip-wheel-metadata/
+MANIFEST
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Distribution / packaging
+*.tar.gz
+*.whl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environments
+.env
+.env.*
+
+# TokenMeter data (don't commit local usage databases)
+*.db
+~/.token-meter/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
