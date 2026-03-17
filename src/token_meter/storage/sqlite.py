@@ -258,6 +258,195 @@ class SQLiteStorage(BaseStorage):
             for r in rows
         ]
 
+    # ------------------------------------------------------------------ #
+    # CLI query helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    def get_records(
+        self,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        limit: int = 20,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        project: Optional[str] = None,
+    ) -> List["UsageRecord"]:
+        """Return records in reverse-chronological order, with CLI-friendly arg order."""
+        return self.query(
+            project=project,
+            provider=provider,
+            model=model,
+            start=start,
+            end=end,
+            limit=limit,
+        )
+
+    def get_total(
+        self,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Total cost/token stats for a time period."""
+        return self.aggregate(project=project, start=start, end=end)
+
+    def get_projects(self) -> List[Dict[str, Any]]:
+        """All projects with aggregated stats, ordered by total cost descending."""
+        sql = """
+        SELECT
+            project,
+            COUNT(*)           AS call_count,
+            SUM(input_tokens)  AS total_input_tokens,
+            SUM(output_tokens) AS total_output_tokens,
+            SUM(total_tokens)  AS total_tokens,
+            SUM(total_cost)    AS total_cost,
+            AVG(latency_ms)    AS avg_latency_ms,
+            MIN(timestamp)     AS first_call,
+            MAX(timestamp)     AS last_call
+        FROM usage
+        GROUP BY project
+        ORDER BY total_cost DESC
+        """
+        with self._lock:
+            cur = self._conn.execute(sql)
+            rows = cur.fetchall()
+
+        return [
+            {
+                "project": r[0],
+                "call_count": r[1],
+                "total_input_tokens": r[2] or 0,
+                "total_output_tokens": r[3] or 0,
+                "total_tokens": r[4] or 0,
+                "total_cost": round(r[5] or 0.0, 6),
+                "avg_latency_ms": round(r[6] or 0.0, 2),
+                "first_call": r[7],
+                "last_call": r[8],
+            }
+            for r in rows
+        ]
+
+    def get_models(self) -> List[Dict[str, Any]]:
+        """All models with aggregated stats, ordered by total cost descending."""
+        sql = """
+        SELECT
+            provider,
+            model,
+            COUNT(*)           AS call_count,
+            SUM(input_tokens)  AS total_input_tokens,
+            SUM(output_tokens) AS total_output_tokens,
+            SUM(total_tokens)  AS total_tokens,
+            SUM(total_cost)    AS total_cost,
+            AVG(latency_ms)    AS avg_latency_ms
+        FROM usage
+        GROUP BY provider, model
+        ORDER BY total_cost DESC
+        """
+        with self._lock:
+            cur = self._conn.execute(sql)
+            rows = cur.fetchall()
+
+        return [
+            {
+                "provider": r[0],
+                "model": r[1],
+                "call_count": r[2],
+                "total_input_tokens": r[3] or 0,
+                "total_output_tokens": r[4] or 0,
+                "total_tokens": r[5] or 0,
+                "total_cost": round(r[6] or 0.0, 6),
+                "avg_latency_ms": round(r[7] or 0.0, 2),
+            }
+            for r in rows
+        ]
+
+    def get_summary(
+        self,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        group_by: str = "model",
+        project: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Aggregated stats with flexible GROUP BY dimension.
+
+        group_by choices: model | provider | project | day | week | month
+        """
+        _valid = {"model", "provider", "project", "day", "week", "month"}
+        if group_by not in _valid:
+            group_by = "model"
+
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if project and group_by != "project":
+            clauses.append("project = ?")
+            params.append(project)
+        if start:
+            clauses.append("timestamp >= ?")
+            params.append(_ts(start))
+        if end:
+            clauses.append("timestamp <= ?")
+            params.append(_ts(end))
+
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        _GROUP_EXPR: Dict[str, str] = {
+            "model":    "provider, model",
+            "provider": "provider",
+            "project":  "project",
+            "day":      "strftime('%Y-%m-%d', timestamp)",
+            "week":     "strftime('%Y-W%W', timestamp)",
+            "month":    "strftime('%Y-%m', timestamp)",
+        }
+        group_expr = _GROUP_EXPR[group_by]
+
+        if group_by == "model":
+            select_cols = "provider, model, NULL AS extra"
+        elif group_by == "provider":
+            select_cols = "provider, NULL AS model, NULL AS extra"
+        elif group_by == "project":
+            select_cols = "NULL AS provider, NULL AS model, project AS extra"
+        else:
+            select_cols = (
+                f"NULL AS provider, NULL AS model, "
+                f"{group_expr} AS extra"
+            )
+            group_expr = f"{group_expr}"
+
+        sql = f"""
+        SELECT
+            {select_cols},
+            COUNT(*)           AS call_count,
+            SUM(input_tokens)  AS total_input_tokens,
+            SUM(output_tokens) AS total_output_tokens,
+            SUM(total_tokens)  AS total_tokens,
+            SUM(total_cost)    AS total_cost,
+            AVG(latency_ms)    AS avg_latency_ms
+        FROM usage {where}
+        GROUP BY {group_expr}
+        ORDER BY total_cost DESC
+        """
+
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+
+        return [
+            {
+                "provider": r[0],
+                "model": r[1],
+                "group": r[2],           # project name or time period for non-model groups
+                "call_count": r[3],
+                "total_input_tokens": r[4] or 0,
+                "total_output_tokens": r[5] or 0,
+                "total_tokens": r[6] or 0,
+                "total_cost": round(r[7] or 0.0, 6),
+                "avg_latency_ms": round(r[8] or 0.0, 2),
+            }
+            for r in rows
+        ]
+
     def close(self) -> None:
         with self._lock:
             try:

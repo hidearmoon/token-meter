@@ -1,13 +1,19 @@
 """Monkey-patch for the Anthropic Python SDK (anthropic >= 0.20.0).
 
 Patches:
-  anthropic.resources.messages.Messages.create  (sync)
-  anthropic.resources.messages.AsyncMessages.create  (async)
+  anthropic.resources.messages.Messages.create      (sync)
+  anthropic.resources.messages.AsyncMessages.create (async)
+  anthropic.resources.messages.Messages.stream      (sync context manager, if present)
+  anthropic.resources.messages.AsyncMessages.stream (async context manager, if present)
 
 For streaming responses the SDK returns a context-manager/iterator.
 We wrap it to intercept the SSE events and accumulate token counts:
   - message_start  → input_tokens
   - message_delta  → output_tokens (usage.output_tokens field)
+
+For the ``client.messages.stream(...)`` context-manager pattern we wrap the
+returned ``MessageStreamManager`` so we can call ``get_final_message()`` on
+exit and record usage from the fully-assembled message object.
 """
 from __future__ import annotations
 
@@ -20,6 +26,64 @@ from ..pricing import get_cost
 from .base import BasePatcher
 
 logger = logging.getLogger(__name__)
+
+
+class _SyncStreamManagerWrapper:
+    """Wrap a ``MessageStreamManager`` to capture usage on context-manager exit."""
+
+    def __init__(self, manager: Any, patcher: "AnthropicPatcher", start_time: float) -> None:
+        self._manager = manager
+        self._patcher = patcher
+        self._start_time = start_time
+        self._stream: Any = None
+
+    def __enter__(self) -> Any:
+        self._stream = self._manager.__enter__()
+        return self._stream
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        result = self._manager.__exit__(exc_type, exc_val, exc_tb)
+        if exc_type is None and self._stream is not None:
+            try:
+                msg = self._stream.get_final_message()
+                elapsed = (time.perf_counter() - self._start_time) * 1000
+                in_tok = getattr(getattr(msg, "usage", None), "input_tokens", 0) or 0
+                out_tok = getattr(getattr(msg, "usage", None), "output_tokens", 0) or 0
+                model = getattr(msg, "model", "") or ""
+                if in_tok or out_tok:
+                    self._patcher._record(in_tok, out_tok, in_tok + out_tok, model, elapsed, True)
+            except Exception:
+                logger.debug("token-meter: failed to record Anthropic stream() usage", exc_info=True)
+        return result
+
+
+class _AsyncStreamManagerWrapper:
+    """Async variant of ``_SyncStreamManagerWrapper``."""
+
+    def __init__(self, manager: Any, patcher: "AnthropicPatcher", start_time: float) -> None:
+        self._manager = manager
+        self._patcher = patcher
+        self._start_time = start_time
+        self._stream: Any = None
+
+    async def __aenter__(self) -> Any:
+        self._stream = await self._manager.__aenter__()
+        return self._stream
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        result = await self._manager.__aexit__(exc_type, exc_val, exc_tb)
+        if exc_type is None and self._stream is not None:
+            try:
+                msg = self._stream.get_final_message()
+                elapsed = (time.perf_counter() - self._start_time) * 1000
+                in_tok = getattr(getattr(msg, "usage", None), "input_tokens", 0) or 0
+                out_tok = getattr(getattr(msg, "usage", None), "output_tokens", 0) or 0
+                model = getattr(msg, "model", "") or ""
+                if in_tok or out_tok:
+                    self._patcher._record(in_tok, out_tok, in_tok + out_tok, model, elapsed, True)
+            except Exception:
+                logger.debug("token-meter: failed to record Anthropic async stream() usage", exc_info=True)
+        return result
 
 
 def _extract_usage_sync(response: Any) -> tuple[int, int, int] | None:
@@ -44,6 +108,9 @@ class AnthropicPatcher(BasePatcher):
         self._module = _mod
         self._original = _mod.Messages.create
         self._original_async = _mod.AsyncMessages.create
+        # stream() is a context-manager helper added in newer SDK versions
+        self._original_stream = getattr(_mod.Messages, "stream", None)
+        self._original_async_stream = getattr(_mod.AsyncMessages, "stream", None)
 
         patcher = self
 
@@ -79,6 +146,24 @@ class AnthropicPatcher(BasePatcher):
 
         _mod.Messages.create = _sync_create
         _mod.AsyncMessages.create = _async_create
+
+        # Patch the context-manager stream() helper only if it exists
+        if self._original_stream is not None:
+            def _sync_stream(self_client, *args, **kwargs):
+                start = time.perf_counter()
+                manager = patcher._original_stream(self_client, *args, **kwargs)
+                return _SyncStreamManagerWrapper(manager, patcher, start)
+
+            _mod.Messages.stream = _sync_stream
+
+        if self._original_async_stream is not None:
+            def _async_stream(self_client, *args, **kwargs):
+                start = time.perf_counter()
+                manager = patcher._original_async_stream(self_client, *args, **kwargs)
+                return _AsyncStreamManagerWrapper(manager, patcher, start)
+
+            _mod.AsyncMessages.stream = _async_stream
+
         return True
 
     def _do_unpatch(self) -> None:
@@ -86,6 +171,10 @@ class AnthropicPatcher(BasePatcher):
             self._module.Messages.create = self._original
         if self._original_async is not None:
             self._module.AsyncMessages.create = self._original_async
+        if self._original_stream is not None:
+            self._module.Messages.stream = self._original_stream
+        if self._original_async_stream is not None:
+            self._module.AsyncMessages.stream = self._original_async_stream
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
