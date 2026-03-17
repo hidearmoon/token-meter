@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
-          pip install openai anthropic
+          pip install openai anthropic google-genai
 
       - name: Run tests with coverage
         run: |
@@ -51,7 +51,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff
+        run: pip install "ruff>=0.4.0"
 
       - name: Run ruff
-        run: ruff check src/ tests/ || true
+        run: ruff check src/ tests/

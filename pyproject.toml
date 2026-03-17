@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "token-meter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Zero-code LLM API cost & usage observability — monkey-patch OpenAI/Anthropic/Google, store locally in SQLite, get budget alerts."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -34,15 +34,16 @@ openai = ["openai>=1.0.0"]
 anthropic = ["anthropic>=0.20.0"]
 google = ["google-genai>=1.0.0"]
 all = ["openai>=1.0.0", "anthropic>=0.20.0", "google-genai>=1.0.0"]
-cli = ["rich>=13.0.0", "click>=8.0.0"]
+cli = ["rich>=13.0.0", "click>=8.2.0,<9"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
     "openai>=1.0.0",
     "anthropic>=0.20.0",
     "rich>=13.0.0",
-    "click>=8.0.0",
+    "click>=8.2.0,<9",
 ]
 
 [project.urls]

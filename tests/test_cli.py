@@ -446,3 +446,225 @@ class TestConfig:
             ["--db-path", str(_make_db(tmp_path)), "config", "--set", "no-equals-sign"],
         )
         assert result.exit_code != 0
+
+
+# ------------------------------------------------------------------ #
+# budget                                                               #
+# ------------------------------------------------------------------ #
+
+class TestBudgetCLI:
+    def test_budget_set_daily(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "budget", "set", "--project", "my-app", "--daily", "10")
+        assert result.exit_code == 0
+        assert "Budget saved" in result.output
+
+    def test_budget_set_weekly_monthly(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "budget", "set", "--weekly", "50", "--monthly", "200")
+        assert result.exit_code == 0
+        assert "Budget saved" in result.output
+
+    def test_budget_set_with_thresholds(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(
+            db_path, "budget", "set",
+            "--daily", "10",
+            "--threshold", "0.8",
+            "--threshold", "1.0",
+        )
+        assert result.exit_code == 0
+
+    def test_budget_set_persists(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "budget", "set", "--project", "proj-a", "--daily", "25")
+        from token_meter.storage.sqlite import SQLiteStorage
+        db = SQLiteStorage(db_path)
+        try:
+            cfg = db.get_budget_config("proj-a")
+            assert cfg is not None
+            assert cfg["daily"] == 25.0
+        finally:
+            db.close()
+
+    def test_budget_set_updates_existing(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "budget", "set", "--project", "p", "--daily", "10")
+        _run(db_path, "budget", "set", "--project", "p", "--daily", "20")
+        from token_meter.storage.sqlite import SQLiteStorage
+        db = SQLiteStorage(db_path)
+        try:
+            cfg = db.get_budget_config("p")
+            assert cfg["daily"] == 20.0
+        finally:
+            db.close()
+
+    def test_budget_status_no_budgets(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "budget", "status")
+        assert result.exit_code == 0
+        assert "No budgets" in result.output
+
+    def test_budget_status_shows_configured(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "budget", "set", "--project", "my-app", "--daily", "10")
+        result = _run(db_path, "budget", "status")
+        assert result.exit_code == 0
+        assert "my-app" in result.output
+        assert "daily" in result.output
+
+    def test_budget_status_project_filter(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "budget", "set", "--project", "proj-a", "--daily", "10")
+        _run(db_path, "budget", "set", "--project", "proj-b", "--daily", "20")
+        result = _run(db_path, "budget", "status", "--project", "proj-a")
+        assert result.exit_code == 0
+        assert "proj-a" in result.output
+        assert "proj-b" not in result.output
+
+    def test_budget_status_shows_spend_percentage(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "budget", "set", "--project", "test-project", "--daily", "10")
+        _seed_db(db_path)  # adds spend
+        result = _run(db_path, "budget", "status", "--project", "test-project")
+        assert result.exit_code == 0
+        assert "%" in result.output
+
+
+# ------------------------------------------------------------------ #
+# alert                                                                #
+# ------------------------------------------------------------------ #
+
+class TestAlertCLI:
+    def test_alert_add(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(
+            db_path, "alert", "add",
+            "--webhook", "https://hooks.slack.com/test",
+            "--project", "my-app",
+        )
+        assert result.exit_code == 0
+        assert "Webhook added" in result.output
+
+    def test_alert_add_persists(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        url = "https://hooks.slack.com/test"
+        _run(db_path, "alert", "add", "--webhook", url, "--project", "p")
+        from token_meter.storage.sqlite import SQLiteStorage
+        db = SQLiteStorage(db_path)
+        try:
+            cfg = db.get_budget_config("p")
+            assert cfg is not None
+            assert url in cfg["webhook_urls"]
+        finally:
+            db.close()
+
+    def test_alert_add_dedup(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        url = "https://hooks.slack.com/test"
+        _run(db_path, "alert", "add", "--webhook", url)
+        result = _run(db_path, "alert", "add", "--webhook", url)
+        assert result.exit_code == 0
+        assert "already registered" in result.output
+
+    def test_alert_list_empty(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "alert", "list")
+        assert result.exit_code == 0
+        assert "No webhooks" in result.output
+
+    def test_alert_list_shows_urls(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        url = "https://my-server.com/alert"
+        _run(db_path, "alert", "add", "--webhook", url, "--project", "p")
+        result = _run(db_path, "alert", "list")
+        assert result.exit_code == 0
+        assert url in result.output
+
+    def test_alert_list_project_filter(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        _run(db_path, "alert", "add", "--webhook", "https://a.example.com", "--project", "proj-a")
+        _run(db_path, "alert", "add", "--webhook", "https://b.example.com", "--project", "proj-b")
+        result = _run(db_path, "alert", "list", "--project", "proj-a")
+        assert result.exit_code == 0
+        assert "proj-a" in result.output
+        assert "proj-b" not in result.output
+
+
+# ------------------------------------------------------------------ #
+# anomalies                                                            #
+# ------------------------------------------------------------------ #
+
+class TestAnomaliesCLI:
+    def test_anomalies_list_empty(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "anomalies")
+        assert result.exit_code == 0
+        assert "No anomalies" in result.output
+
+    def test_anomalies_list_with_data(self, tmp_path: Path) -> None:
+        from token_meter.storage.sqlite import SQLiteStorage
+        db_path = _make_db(tmp_path)
+        db = SQLiteStorage(db_path)
+        try:
+            db.save_anomaly({
+                "project": "my-app",
+                "model": "gpt-4o",
+                "date": "2024-01-15",
+                "daily_cost": 45.20,
+                "rolling_avg": 12.30,
+                "rolling_std": 5.50,
+                "z_score": 5.98,
+            })
+        finally:
+            db.close()
+
+        result = _run(db_path, "anomalies")
+        assert result.exit_code == 0
+        assert "my-app" in result.output
+        assert "gpt-4o" in result.output
+
+    def test_anomalies_days_option(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "anomalies", "--days", "7")
+        assert result.exit_code == 0
+
+    def test_anomalies_project_filter(self, tmp_path: Path) -> None:
+        from token_meter.storage.sqlite import SQLiteStorage
+        db_path = _make_db(tmp_path)
+        db = SQLiteStorage(db_path)
+        try:
+            for proj in ("app-a", "app-b"):
+                db.save_anomaly({
+                    "project": proj,
+                    "model": "gpt-4o",
+                    "date": "2024-01-15",
+                    "daily_cost": 50.0,
+                    "rolling_avg": 10.0,
+                    "rolling_std": 2.0,
+                    "z_score": 20.0,
+                })
+        finally:
+            db.close()
+
+        result = _run(db_path, "anomalies", "--project", "app-a")
+        assert result.exit_code == 0
+        assert "app-a" in result.output
+        assert "app-b" not in result.output
+
+    def test_anomalies_check_no_data(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "anomalies", "check")
+        assert result.exit_code == 0
+        assert "No anomalies" in result.output
+
+    def test_anomalies_check_custom_z_score(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "anomalies", "check", "--z-score", "3.0")
+        assert result.exit_code == 0
+
+    def test_anomalies_check_project_filter(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path)
+        result = _run(db_path, "anomalies", "check", "--project", "nonexistent")
+        assert result.exit_code == 0
+        assert "No anomalies" in result.output

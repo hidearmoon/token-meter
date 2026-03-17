@@ -6,12 +6,14 @@ that call the same patched SDK methods don't race on the connection.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..models import UsageRecord
 from .base import BaseStorage
@@ -37,12 +39,50 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 """
 
+_CREATE_CONFIG_TABLE = """
+CREATE TABLE IF NOT EXISTS config (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+"""
+
+_CREATE_ANOMALIES_TABLE = """
+CREATE TABLE IF NOT EXISTS anomalies (
+    id          TEXT PRIMARY KEY,
+    detected_at TEXT NOT NULL,
+    project     TEXT NOT NULL,
+    model       TEXT,
+    date        TEXT NOT NULL,
+    daily_cost  REAL NOT NULL,
+    rolling_avg REAL NOT NULL,
+    rolling_std REAL NOT NULL,
+    z_score     REAL NOT NULL,
+    alerted     INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_CREATE_ALERT_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS alert_log (
+    id          TEXT PRIMARY KEY,
+    logged_at   TEXT NOT NULL,
+    alert_type  TEXT NOT NULL,
+    project     TEXT NOT NULL,
+    period      TEXT,
+    threshold   REAL,
+    period_key  TEXT,
+    payload     TEXT NOT NULL
+);
+"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_timestamp ON usage (timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_provider  ON usage (provider);",
     "CREATE INDEX IF NOT EXISTS idx_model     ON usage (model);",
     "CREATE INDEX IF NOT EXISTS idx_project   ON usage (project);",
     "CREATE INDEX IF NOT EXISTS idx_proj_ts   ON usage (project, timestamp);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_dedup ON alert_log (alert_type, project, period, threshold, period_key);",
+    "CREATE INDEX IF NOT EXISTS idx_anomalies_proj ON anomalies (project, date);",
 ]
 
 _INSERT = """
@@ -72,6 +112,11 @@ class SQLiteStorage(BaseStorage):
         self._lock = threading.Lock()
         self._conn = self._connect()
         self._init_schema()
+        self._post_save_callbacks: List[Callable] = []
+
+    def register_post_save_hook(self, callback: Callable) -> None:
+        """Register a callback invoked after each successful save(record)."""
+        self._post_save_callbacks.append(callback)
 
     # ------------------------------------------------------------------ #
     # Connection management                                                #
@@ -92,6 +137,9 @@ class SQLiteStorage(BaseStorage):
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(_CREATE_TABLE)
+            cur.execute(_CREATE_CONFIG_TABLE)
+            cur.execute(_CREATE_ANOMALIES_TABLE)
+            cur.execute(_CREATE_ALERT_LOG_TABLE)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
             self._conn.commit()
@@ -101,12 +149,20 @@ class SQLiteStorage(BaseStorage):
     # ------------------------------------------------------------------ #
 
     def save(self, record: UsageRecord) -> None:
+        saved = False
         with self._lock:
             try:
                 self._conn.execute(_INSERT, record.to_row())
                 self._conn.commit()
+                saved = True
             except sqlite3.Error:
                 logger.exception("token-meter: failed to save usage record")
+        if saved:
+            for cb in self._post_save_callbacks:
+                try:
+                    cb(record)
+                except Exception:
+                    logger.exception("token-meter: post-save hook failed")
 
     def query(
         self,
@@ -446,6 +502,218 @@ class SQLiteStorage(BaseStorage):
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------ #
+    # Budget helpers                                                       #
+    # ------------------------------------------------------------------ #
+
+    def get_period_spend(self, project: str, start: datetime) -> float:
+        """Total cost for *project* since *start* (used for budget threshold check)."""
+        sql = "SELECT SUM(total_cost) FROM usage WHERE project = ? AND timestamp >= ?"
+        with self._lock:
+            cur = self._conn.execute(sql, (project, _ts(start)))
+            row = cur.fetchone()
+        return row[0] or 0.0
+
+    def get_top_models(
+        self, project: str, start: datetime, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Top models by cost for *project* since *start*."""
+        sql = """
+        SELECT model, SUM(total_cost) AS cost
+        FROM usage WHERE project = ? AND timestamp >= ?
+        GROUP BY model ORDER BY cost DESC LIMIT ?
+        """
+        with self._lock:
+            cur = self._conn.execute(sql, (project, _ts(start), limit))
+            rows = cur.fetchall()
+        return [{"model": r[0], "cost": round(r[1] or 0.0, 6)} for r in rows]
+
+    def has_budget_alert(
+        self, project: str, period: str, threshold: float, period_key: str
+    ) -> bool:
+        """Return True if this exact threshold was already alerted for this period window."""
+        sql = """
+        SELECT 1 FROM alert_log
+        WHERE alert_type='budget_threshold' AND project=? AND period=?
+              AND threshold=? AND period_key=?
+        """
+        with self._lock:
+            cur = self._conn.execute(sql, (project, period, threshold, period_key))
+            return cur.fetchone() is not None
+
+    def log_budget_alert(
+        self,
+        project: str,
+        period: str,
+        threshold: float,
+        period_key: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Record that a budget alert has been sent (for dedup)."""
+        now = datetime.now(timezone.utc).isoformat()
+        sql = """
+        INSERT OR IGNORE INTO alert_log
+            (id, logged_at, alert_type, project, period, threshold, period_key, payload)
+        VALUES (?, ?, 'budget_threshold', ?, ?, ?, ?, ?)
+        """
+        with self._lock:
+            try:
+                self._conn.execute(
+                    sql,
+                    (
+                        str(uuid.uuid4()),
+                        now,
+                        project,
+                        period,
+                        threshold,
+                        period_key,
+                        json.dumps(payload, default=str),
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.exception("token-meter: failed to log budget alert")
+
+    def set_budget_config(self, project: str, data: Dict[str, Any]) -> None:
+        """Persist budget config dict for *project* in the config table."""
+        now = datetime.now(timezone.utc).isoformat()
+        sql = """
+        INSERT INTO config (key, value, updated) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated
+        """
+        with self._lock:
+            try:
+                self._conn.execute(
+                    sql, (f"budget:{project}", json.dumps(data, default=str), now)
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.exception("token-meter: failed to save budget config")
+
+    def get_budget_config(self, project: str) -> Optional[Dict[str, Any]]:
+        """Return budget config dict for *project*, or None."""
+        sql = "SELECT value FROM config WHERE key = ?"
+        with self._lock:
+            cur = self._conn.execute(sql, (f"budget:{project}",))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def get_all_budget_configs(self) -> List[Dict[str, Any]]:
+        """Return all stored budget configs as a list of dicts with 'project' key."""
+        sql = "SELECT key, value FROM config WHERE key LIKE 'budget:%'"
+        with self._lock:
+            cur = self._conn.execute(sql)
+            rows = cur.fetchall()
+        result = []
+        for key, value in rows:
+            project = key[len("budget:"):]
+            try:
+                data = json.loads(value)
+                data["project"] = project
+                result.append(data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Anomaly helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def get_project_model_combos(
+        self, project: Optional[str] = None
+    ) -> List[tuple]:
+        """All distinct (project, model) pairs in the usage table."""
+        if project:
+            sql = "SELECT DISTINCT project, model FROM usage WHERE project = ?"
+            params: tuple = (project,)
+        else:
+            sql = "SELECT DISTINCT project, model FROM usage"
+            params = ()
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            return cur.fetchall()
+
+    def get_daily_costs(
+        self,
+        project: str,
+        model: str,
+        start_date: "date",
+        end_date: "date",
+    ) -> List[Dict[str, Any]]:
+        """Daily cost totals for a project+model within [start_date, end_date]."""
+        start_ts = datetime(
+            start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc
+        ).isoformat()
+        end_ts = datetime(
+            end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc
+        ).isoformat()
+        sql = """
+        SELECT strftime('%Y-%m-%d', timestamp) AS day, SUM(total_cost) AS daily_cost
+        FROM usage
+        WHERE project = ? AND model = ? AND timestamp >= ? AND timestamp <= ?
+        GROUP BY day
+        ORDER BY day
+        """
+        with self._lock:
+            cur = self._conn.execute(sql, (project, model, start_ts, end_ts))
+            rows = cur.fetchall()
+        return [{"date": r[0], "daily_cost": r[1] or 0.0} for r in rows]
+
+    def save_anomaly(self, anomaly: Dict[str, Any]) -> None:
+        """Persist a detected anomaly record."""
+        now = datetime.now(timezone.utc).isoformat()
+        sql = """
+        INSERT OR IGNORE INTO anomalies
+            (id, detected_at, project, model, date, daily_cost,
+             rolling_avg, rolling_std, z_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._lock:
+            try:
+                self._conn.execute(
+                    sql,
+                    (
+                        str(uuid.uuid4()),
+                        now,
+                        anomaly["project"],
+                        anomaly.get("model"),
+                        anomaly["date"],
+                        anomaly["daily_cost"],
+                        anomaly["rolling_avg"],
+                        anomaly["rolling_std"],
+                        anomaly["z_score"],
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.exception("token-meter: failed to save anomaly")
+
+    def get_anomalies(
+        self, project: Optional[str] = None, days: int = 30
+    ) -> List[Dict[str, Any]]:
+        """Anomalies detected within the last *days* days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        clauses = ["detected_at >= ?"]
+        params: List[Any] = [cutoff]
+        if project:
+            clauses.append("project = ?")
+            params.append(project)
+        where = "WHERE " + " AND ".join(clauses)
+        sql = f"SELECT * FROM anomalies {where} ORDER BY detected_at DESC"
+        cols = [
+            "id", "detected_at", "project", "model", "date",
+            "daily_cost", "rolling_avg", "rolling_std", "z_score", "alerted",
+        ]
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
 
     def close(self) -> None:
         with self._lock:
